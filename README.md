@@ -77,12 +77,13 @@ Use an HTTP Request node:
 - Method: `POST`
 - URL: `http://127.0.0.1:8000/send-imessage`
 - Header `X-API-Token`: the same token you configured in `main.py`
-- JSON body:
+- JSON body (optional `service`: `"imessage"` or `"sms"`, default `"imessage"`):
 
 ```json
 {
   "to": "+15551234567",
-  "text": "Hello from n8n via FastAPI"
+  "text": "Hello from n8n via FastAPI",
+  "service": "imessage"
 }
 ```
 
@@ -100,3 +101,29 @@ In the HTTP Request node:
 - URL: `http://host.docker.internal:8000/send-imessage`
 - Header `X-API-Token`: the same token you configured in `main.py`
 - JSON body as above.
+
+## Push received messages into n8n (cron)
+
+This repo includes `push-received-to-n8n.py`, which reads new **inbound** Messages from `~/Library/Messages/chat.db` and POSTs them to an n8n Webhook URL.
+
+1) Update `N8N_WEBHOOK_URL` in `push-received-to-n8n.py` (for example to `http://localhost:8080/webhook/REPLACE_ME`).
+
+2) One-time test:
+
+```bash
+python3 push-received-to-n8n.py
+```
+
+3) Add to cron (runs every minute):
+
+```bash
+crontab -e
+```
+
+```bash
+* * * * * /usr/bin/python3 /ABS/PATH/TO/push-received-to-n8n.py >> /ABS/PATH/TO/received-cron.log 2>&1
+```
+
+Notes:
+- The script stores its cursor in `.received_state.json` (so it won’t resend messages).
+- By default it skips blank/attachment-only rows.
