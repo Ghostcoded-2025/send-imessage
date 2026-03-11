@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from subprocess import CalledProcessError, run
-from typing import Optional
+from typing import Literal, Optional
 
 
 IMESSAGE_SCRIPT = (Path(__file__).resolve().parent / "send-imessage.scpt").as_posix()
@@ -13,6 +13,7 @@ API_TOKEN = "change-me-imessage-token"
 class IMessageRequest(BaseModel):
     to: str
     text: str
+    service: Literal["imessage", "sms"] = "imessage"
 
 
 app = FastAPI()
@@ -25,7 +26,7 @@ def send_imessage(payload: IMessageRequest, x_api_token: Optional[str] = Header(
 
     try:
         result = run(
-            ["osascript", IMESSAGE_SCRIPT, payload.to, payload.text],
+            ["osascript", IMESSAGE_SCRIPT, payload.to, payload.text, payload.service],
             capture_output=True,
             text=True,
             check=True,
