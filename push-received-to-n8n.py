@@ -4,6 +4,7 @@ import sqlite3
 import sys
 import time
 import urllib.request
+from urllib.error import HTTPError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -12,10 +13,10 @@ from typing import Optional
 CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 STATE_FILE = Path(__file__).resolve().parent / ".received_state.json"
 
-# Set this to your n8n Webhook URL.
-# Example: "http://localhost:8080/webhook/REPLACE_ME"
-N8N_WEBHOOK_URL = "http://localhost:8080/webhook/REPLACE_ME"
+# n8n via public HTTPS (no port in URL)
+N8N_WEBHOOK_URL = "https://n8n.ghostcoded.com/webhook/b1b85f8d-4732-4556-8348-715eb0337db5"
 
+# Safety cap per cron run so a long backlog doesn't hammer n8n.
 MAX_MESSAGES_PER_RUN = 50
 
 
@@ -45,11 +46,15 @@ def _save_state(state: dict) -> None:
 
 
 def _apple_time_ns_to_unix_seconds(date_ns: int) -> float:
+    # Messages uses Apple's epoch: 2001-01-01 00:00:00 UTC.
+    # On modern macOS, the `date` column is typically in nanoseconds.
     apple_epoch_unix = 978307200
     return apple_epoch_unix + (date_ns / 1_000_000_000)
 
 
 def _fetch_new_received_messages(conn: sqlite3.Connection, last_rowid: int) -> list[ReceivedMessage]:
+    # Only inbound messages: is_from_me = 0
+    # We join through chat_message_join to capture chat identifier.
     rows = conn.execute(
         """
         SELECT
@@ -100,10 +105,16 @@ def _post_to_n8n(msg: ReceivedMessage) -> None:
     req = urllib.request.Request(
         N8N_WEBHOOK_URL,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            # Avoid default Python-urllib UA which some WAF rules block.
+            "User-Agent": "curl/8.5.0",
+            "Accept": "*/*",
+        },
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
+        # Consume body to complete request cleanly.
         resp.read()
 
 
@@ -129,6 +140,7 @@ def main() -> int:
 
     max_rowid = last_rowid
     for msg in msgs:
+        # Skip empty text rows (attachments, tapbacks, etc.) to avoid noise.
         if not (msg.text or "").strip():
             max_rowid = max(max_rowid, msg.rowid)
             continue
@@ -136,10 +148,27 @@ def main() -> int:
         try:
             _post_to_n8n(msg)
             max_rowid = max(max_rowid, msg.rowid)
+        except HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else ""
+            if 400 <= e.code < 500:
+                # Log and skip this message so we don't get stuck on permanent client errors.
+                print(
+                    f"Client error posting rowid={msg.rowid}: {e.code} {e.reason} | body={body}",
+                    file=sys.stderr,
+                )
+                max_rowid = max(max_rowid, msg.rowid)
+                continue
+            print(
+                f"Failed posting rowid={msg.rowid}: {e.code} {e.reason} | body={body}",
+                file=sys.stderr,
+            )
+            break
         except Exception as e:
+            # If posting fails with a non-HTTP error, don't advance state past this message.
             print(f"Failed posting rowid={msg.rowid}: {e}", file=sys.stderr)
             break
 
+        # Tiny jitter to avoid bursty webhook traffic.
         time.sleep(0.05)
 
     if max_rowid != last_rowid:

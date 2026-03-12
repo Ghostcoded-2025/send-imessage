@@ -1,13 +1,11 @@
-from pathlib import Path
-
 from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 from subprocess import CalledProcessError, run
 from typing import Literal, Optional
 
 
-IMESSAGE_SCRIPT = (Path(__file__).resolve().parent / "send-imessage.scpt").as_posix()
-API_TOKEN = "change-me-imessage-token"
+IMESSAGE_SCRIPT = "/Users/tannerwoodrum/Documents/Ghostcoded/repos/Ghostcoded/scripts/imessage-fastapi/send-imessage.scpt"
+API_TOKEN = "NDTIM19R282QusjKQ1Qm0qdSFvg5Zxsm"
 
 
 class IMessageRequest(BaseModel):
@@ -37,3 +35,4 @@ def send_imessage(payload: IMessageRequest, x_api_token: Optional[str] = Header(
             status_code=500,
             detail={"error": "Failed to send iMessage", "stderr": e.stderr},
         )
+

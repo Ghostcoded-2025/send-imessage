@@ -1,8 +1,6 @@
 # iMessage FastAPI bridge
 
-Small FastAPI service that lets n8n (or anything else) send iMessages via the local Messages.app on a Mac.
-
-**Requirements:** macOS, Messages signed in with iMessage.
+Small FastAPI service that lets n8n (or anything else) send iMessages via the local Messages.app on this Mac.
 
 ## Setup
 
@@ -66,8 +64,6 @@ curl -X POST http://127.0.0.1:8000/send-imessage \
   -d '{"to":"+15551234567","text":"Test from FastAPI"}'
 ```
 
-The first time you send, macOS will prompt to allow Terminal (or the process running the script) to control Messages—click Allow.
-
 ## n8n configuration
 
 ### n8n running directly on macOS (no Docker)
@@ -105,25 +101,60 @@ In the HTTP Request node:
 ## Push received messages into n8n (cron)
 
 This repo includes `push-received-to-n8n.py`, which reads new **inbound** Messages from `~/Library/Messages/chat.db` and POSTs them to an n8n Webhook URL.
+By default it is configured to call:
 
-1) Update `N8N_WEBHOOK_URL` in `push-received-to-n8n.py` (for example to `http://localhost:8080/webhook/REPLACE_ME`).
+```text
+http://localhost:8080/webhook/b1b85f8d-4732-4556-8348-715eb0337db5
+```
 
-2) One-time test:
+If you change your n8n URL or webhook path, update `N8N_WEBHOOK_URL` in `push-received-to-n8n.py`.
+
+### One-time test
 
 ```bash
 python3 push-received-to-n8n.py
 ```
 
-3) Add to cron (runs every minute):
+If macOS blocks access to `~/Library/Messages/chat.db`, you’ll need to grant your shell/cron runner permission (macOS privacy settings vary by version).
+
+### Add to cron (runs every minute)
+
+Edit crontab:
 
 ```bash
 crontab -e
 ```
 
+Add:
+
 ```bash
-* * * * * /usr/bin/python3 /ABS/PATH/TO/push-received-to-n8n.py >> /ABS/PATH/TO/received-cron.log 2>&1
+* * * * * /usr/bin/python3 /Users/tannerwoodrum/Documents/Ghostcoded/repos/Ghostcoded/scripts/imessage-fastapi/push-received-to-n8n.py >> /Users/tannerwoodrum/Documents/Ghostcoded/repos/Ghostcoded/scripts/imessage-fastapi/received-cron.log 2>&1
 ```
 
 Notes:
 - The script stores its cursor in `.received_state.json` (so it won’t resend messages).
 - By default it skips blank/attachment-only rows.
+
+## Export contacts into n8n
+
+Use `export-contacts-to-n8n.py` to send your macOS Contacts (name + phone) plus a best-guess channel (`imessage` / `sms` / `unknown`) into n8n.
+
+1. Set `N8N_CONTACTS_WEBHOOK_URL` in `export-contacts-to-n8n.py` to a Webhook URL in n8n that will receive the contact list.
+2. Run it once:
+
+```bash
+python3 export-contacts-to-n8n.py
+```
+
+The payload looks like:
+
+```json
+{
+  "source": "imessage-contacts",
+  "contacts": [
+    { "name": "Alice Example", "phone": "+15551234567", "channel": "imessage" },
+    { "name": "Bob Example", "phone": "+15557654321", "channel": "sms" }
+  ]
+}
+```
+
