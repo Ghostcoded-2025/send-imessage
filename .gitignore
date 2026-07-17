@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.received_state.json
+server.log
+uvicorn.pid
+received-cron.log
+contacts-export.log
+.DS_Store
