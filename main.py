@@ -1,7 +1,10 @@
+import logging
 import os
 import re
+import secrets
 import sqlite3
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from shutil import copyfileobj
 from subprocess import CalledProcessError, run
@@ -11,13 +14,16 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFil
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+logger = logging.getLogger("imessage_api")
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
 BASE_DIR = Path(__file__).resolve().parent
 IMESSAGE_SCRIPT = BASE_DIR / "send-imessage.scpt"
 IMESSAGE_ATTACHMENT_SCRIPT = BASE_DIR / "send-imessage-attachment.scpt"
 CHAT_DB = Path.home() / "Library" / "Messages" / "chat.db"
 ATTACHMENTS_ROOT = (Path.home() / "Library" / "Messages" / "Attachments").resolve()
 
-# Required. Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+# Required. Generate with: python -c 'import secrets;print(secrets.token_urlsafe(32))'
 API_TOKEN = os.environ.get("IMESSAGE_API_TOKEN", "").strip()
 if not API_TOKEN:
     raise RuntimeError(
@@ -34,12 +40,61 @@ class IMessageRequest(BaseModel):
     service: Literal["imessage", "sms"] = "imessage"
 
 
-app = FastAPI(title="Local iMessage API", docs_url="/docs")
+def bind_host() -> str:
+    return os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1"
+
+
+def send_enabled() -> bool:
+    return os.environ.get("ENABLE_SEND", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def allowed_chat_guids() -> frozenset[str]:
+    raw = os.environ.get("ALLOWED_CHAT_GUIDS", "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _guid_params(guids: frozenset[str]) -> tuple[str, list[str]]:
+    ordered = sorted(guids)
+    return ",".join("?" for _ in ordered), ordered
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    if not allowed_chat_guids():
+        logger.warning(
+            "ALLOWED_CHAT_GUIDS is empty; any chat is readable with a valid API token"
+        )
+    host = bind_host()
+    if host not in LOOPBACK_HOSTS:
+        logger.warning(
+            "HOST=%s is not loopback; expose this API only through a tunnel or reverse proxy",
+            host,
+        )
+    yield
+
+
+app = FastAPI(title="Local iMessage API", docs_url="/docs", lifespan=_lifespan)
 
 
 def _require_token(x_api_token: Optional[str]) -> None:
-    if not API_TOKEN or x_api_token != API_TOKEN:
+    provided = x_api_token if isinstance(x_api_token, str) else ""
+    try:
+        matches = bool(API_TOKEN) and secrets.compare_digest(provided, API_TOKEN)
+    except TypeError:
+        matches = False
+    if not matches:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _require_send_enabled() -> None:
+    if not send_enabled():
+        raise HTTPException(status_code=403, detail="Sending is disabled")
+
+
+def _run_send(args: list[str]):
+    """Sole osascript send path. Refuses before subprocess unless ENABLE_SEND is on."""
+    _require_send_enabled()
+    return run(args, capture_output=True, text=True, check=True)
 
 
 def _open_chat_db() -> sqlite3.Connection:
@@ -142,7 +197,7 @@ def health():
     return {
         "ok": True,
         "chat_db_exists": CHAT_DB.exists(),
-        "bind_hint": "127.0.0.1",
+        "bind_hint": bind_host(),
     }
 
 
@@ -153,9 +208,17 @@ def list_chats(
 ):
     """List conversations with latest activity (local chat.db)."""
     _require_token(x_api_token)
+    allowed = allowed_chat_guids()
+    where = ""
+    params: list[Any] = []
+    if allowed:
+        placeholders, guids = _guid_params(allowed)
+        where = f"WHERE c.guid IN ({placeholders})"
+        params.extend(guids)
+    params.append(limit)
     with _open_chat_db() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT
               c.ROWID AS chat_id,
               c.chat_identifier,
@@ -166,11 +229,12 @@ def list_chats(
             FROM chat c
             JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
             JOIN message m ON m.ROWID = cmj.message_id
+            {where}
             GROUP BY c.ROWID
             ORDER BY last_message_date DESC
             LIMIT ?
             """,
-            (limit,),
+            params,
         ).fetchall()
     return {
         "chats": [
@@ -203,6 +267,7 @@ def list_messages(
     Includes both from-me and from-others when direction=all.
     """
     _require_token(x_api_token)
+    allowed = allowed_chat_guids()
 
     clauses = ["m.ROWID > ?"]
     params: list[Any] = [after_rowid]
@@ -223,6 +288,11 @@ def list_messages(
     if handle:
         clauses.append("h.id = ?")
         params.append(handle)
+
+    if allowed:
+        placeholders, guids = _guid_params(allowed)
+        clauses.append(f"c.guid IN ({placeholders})")
+        params.extend(guids)
 
     where = " AND ".join(clauses)
     params.append(limit)
@@ -251,6 +321,13 @@ def list_messages(
     """
 
     with _open_chat_db() as conn:
+        if allowed and chat_identifier:
+            chat_rows = conn.execute(
+                "SELECT guid FROM chat WHERE chat_identifier = ?",
+                (chat_identifier,),
+            ).fetchall()
+            if not any(row["guid"] in allowed for row in chat_rows):
+                raise HTTPException(status_code=403, detail="Chat not allowed")
         rows = conn.execute(sql, params).fetchall()
         messages: list[dict[str, Any]] = []
         for r in rows:
@@ -289,11 +366,31 @@ def get_attachment_file(
 ):
     """Serve a local Messages attachment file (photos/videos/etc) from this Mac only."""
     _require_token(x_api_token)
+    allowed = allowed_chat_guids()
     with _open_chat_db() as conn:
-        row = conn.execute(
-            "SELECT filename, transfer_name, mime_type FROM attachment WHERE ROWID = ?",
-            (attachment_id,),
-        ).fetchone()
+        if allowed:
+            placeholders, guids = _guid_params(allowed)
+            row = conn.execute(
+                f"""
+                SELECT a.filename, a.transfer_name, a.mime_type
+                FROM attachment a
+                WHERE a.ROWID = ?
+                  AND EXISTS (
+                    SELECT 1
+                    FROM message_attachment_join maj
+                    JOIN chat_message_join cmj ON cmj.message_id = maj.message_id
+                    JOIN chat c ON c.ROWID = cmj.chat_id
+                    WHERE maj.attachment_id = a.ROWID
+                      AND c.guid IN ({placeholders})
+                  )
+                """,
+                (attachment_id, *guids),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT filename, transfer_name, mime_type FROM attachment WHERE ROWID = ?",
+                (attachment_id,),
+            ).fetchone()
     if not row or not row["filename"]:
         raise HTTPException(status_code=404, detail="Attachment not found")
 
@@ -318,12 +415,10 @@ def get_attachment_file(
 @app.post("/send-imessage")
 def send_imessage(payload: IMessageRequest, x_api_token: Optional[str] = Header(None)):
     _require_token(x_api_token)
+    _require_send_enabled()
     try:
-        result = run(
-            ["osascript", str(IMESSAGE_SCRIPT), payload.to, payload.text, payload.service],
-            capture_output=True,
-            text=True,
-            check=True,
+        result = _run_send(
+            ["osascript", str(IMESSAGE_SCRIPT), payload.to, payload.text, payload.service]
         )
         return {"ok": True, "stdout": result.stdout.strip()}
     except CalledProcessError as e:
@@ -343,6 +438,7 @@ async def send_imessage_with_attachment(
 ):
     """Send a photo/video/file (+ optional caption) via local Messages.app."""
     _require_token(x_api_token)
+    _require_send_enabled()
 
     suffix = Path(file.filename or "upload").suffix
     if not suffix or len(suffix) > 20:
@@ -354,7 +450,7 @@ async def send_imessage_with_attachment(
         with open(tmp_path, "wb") as out:
             copyfileobj(file.file, out)
 
-        result = run(
+        result = _run_send(
             [
                 "osascript",
                 str(IMESSAGE_ATTACHMENT_SCRIPT),
@@ -362,10 +458,7 @@ async def send_imessage_with_attachment(
                 tmp_path,
                 service,
                 caption or "",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
+            ]
         )
         return {"ok": True, "stdout": result.stdout.strip()}
     except CalledProcessError as e:
@@ -379,3 +472,13 @@ async def send_imessage_with_attachment(
             os.unlink(tmp_path)
         except OSError:
             pass
+
+
+def main() -> None:
+    import uvicorn
+
+    uvicorn.run(app, host=bind_host(), port=8000)
+
+
+if __name__ == "__main__":
+    main()
