@@ -3,8 +3,11 @@ __pycache__/
 *.pyc
 .env
 .received_state.json
+.imessage-relay-state.json
+imessage-relay-state.json
 server.log
 uvicorn.pid
 received-cron.log
 contacts-export.log
+imessage-relay.log
 .DS_Store

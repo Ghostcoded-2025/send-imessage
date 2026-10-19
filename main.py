@@ -1,5 +1,4 @@
 import os
-import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -10,6 +9,8 @@ from typing import Any, Literal, Optional
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+from message_text import message_text as _message_text
 
 BASE_DIR = Path(__file__).resolve().parent
 IMESSAGE_SCRIPT = BASE_DIR / "send-imessage.scpt"
@@ -63,29 +64,6 @@ def _apple_time_ns_to_unix(date_ns: Optional[int]) -> Optional[float]:
     if not date_ns:
         return None
     return APPLE_EPOCH_UNIX + (date_ns / 1_000_000_000)
-
-
-def _text_from_attributed_body(blob: Optional[bytes]) -> Optional[str]:
-    if not blob:
-        return None
-    try:
-        raw = blob.decode("utf-8", errors="ignore")
-    except Exception:
-        return None
-    if "NSString" not in raw:
-        return None
-    chunk = raw.split("NSString", 1)[1]
-    if "NSDictionary" in chunk:
-        chunk = chunk.split("NSDictionary", 1)[0]
-    cleaned = "".join(ch for ch in chunk if ch.isprintable() or ch in "\n\r\t").strip()
-    cleaned = re.sub(r"^[\x00-\x1f]+", "", cleaned).strip()
-    return cleaned or None
-
-
-def _message_text(text: Optional[str], attributed_body: Optional[bytes]) -> Optional[str]:
-    if text and text.strip():
-        return text
-    return _text_from_attributed_body(attributed_body)
 
 
 def _expand_attachment_path(filename: Optional[str]) -> Optional[Path]:
