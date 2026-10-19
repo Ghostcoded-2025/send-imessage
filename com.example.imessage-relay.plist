@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<!--
+  LaunchAgent template. Replace every REPLACE_ placeholder before loading.
+  KeepAlive runs relay.py's own loop (POLL_INTERVAL, default 30s).
+  Do not pass the once flag and do not set StartInterval.
+  launchd does not expand a tilde. Log paths must be absolute.
+-->
+<dict>
+  <key>Label</key>
+  <string>com.example.imessage-relay</string>
+  <key>WorkingDirectory</key>
+  <string>/REPLACE/WITH/REPO</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/REPLACE/WITH/REPO/.venv/bin/python</string>
+    <string>/REPLACE/WITH/REPO/relay.py</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/REPLACE_ME/Library/Logs/imessage-relay.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/REPLACE_ME/Library/Logs/imessage-relay.log</string>
+</dict>
+</plist>
